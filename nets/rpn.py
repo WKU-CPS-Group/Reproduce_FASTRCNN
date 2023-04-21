@@ -84,7 +84,7 @@ class RegionProposalNetwork(nn.Module):
                  ) -> None:
         super().__init__()
         # 生成基础的 anchor_base 一般为九个，shape为[9,4]
-        self.anchor_base = generate_anchor_base(anchor_scale = anc)
+        self.anchor_base = generate_anchor_base(anchor_scale = anchor_scales)
         n_anchor = self.anchor_base.shape[0]
 
         # 根据原文中，我们先进行3*3的特征卷积
@@ -100,7 +100,7 @@ class RegionProposalNetwork(nn.Module):
         self.feat_stride = feat_stride
 
         #实例化建议框生成器
-        self.proposal_creator = ProposalCreator(mode)
+        self.proposal_layer = ProposalCreator(mode)
 
         # 对卷积网络进行权值初始化
         normal_init(self.conv1,0,0.01)
@@ -122,14 +122,39 @@ class RegionProposalNetwork(nn.Module):
 
         # 对分类的结果进行softmax回归
         rpn_softmax_score = F.softmax(rpn_scores,dim = -1)
-        rpn_scores = rpn_softmax_score[:,:,1].contiguous()
+        rpn_fg_scores = rpn_softmax_score[:,:,1].contiguous()
         # 这一步不理解，如果做出了这样的变换，那score将与其他的元素混在一起
-        rpn_scores = rpn_scores.view[n,-1]
+        rpn_fg_scores = rpn_scores.view[n,-1]
 
-        # 根据anchor_base生成全局的anchors
+        # 根据anchor_base生成全局的anchors 也叫先验框 （38*38*9，4）
+        anchor = _enumerate_shifted_anchor(np.array(self.anchor_base), self.feat_stride,h,w)
+        rois = []
+        roi_indices = []
+
+        # 对batch进行逐一操作
+        for i in range(n):
+            roi = self.proposal_layer(rpn_locs[i],rpn_fg_scores[i],anchor,img_size,scale=scale)
+            batch_index = i *torch.ones((len(roi),))
+            rois.append(roi.unsqueeze(0))
+            roi_indices.append(batch_index.unsqueeze(0))
         
+        rois = torch.cat(rois,dim=0).type_as(x)
+        roi_indices = torch.cat(roi_indices,dim =0).type_as(x)
+        anchor      = torch.from_numpy(anchor).unsqueeze(0).float().to(x.device)
 
+        return rpn_locs, rpn_scores, rois, roi_indices, anchor
+    
 
+def normal_init(m,mean,stddev,truncated = False):
+        # 在使用m.weight.data.normal_()函数随机初始化权重时，如果没有指定std（即标准差），
+        # 则会使用默认值为1的标准正态分布（均值为0，标准差为1）来初始化权重，也就是说权重的原始stddev是1。
+        # 因此，在执行.mul_(stddev)操作时，实际上是将权重缩放为标准差为stddev的正态分布。
+        if truncated:
+            m.weight.data.normal_().fmod_(2).mul_(stddev).add_(mean)
+        
+        else:
+            m.weight.data.normal_(mean, stddev)
+            m.bias.data.zero_()
 
 
         
